@@ -1,0 +1,67 @@
+# Tunable configuration for graph-agent
+# All values can be overridden via environment variables prefixed with GRAPH_AGENT_
+
+[database]
+url = "postgresql://graph_agent:graph_agent_pass@127.0.0.1:5432/graph_agent_db"
+pool_size = 5
+max_overflow = 10
+
+[indexer]
+# Languages to index (tree-sitter grammars that must be installed)
+languages = ["python"]
+# Directories to always skip (in addition to .gitignore)
+skip_dirs = [
+    "__pycache__", ".git", ".venv", "venv", "node_modules",
+    "dist", "build", ".eggs", "*.egg-info", "migrations",
+    ".mypy_cache", ".pytest_cache", "htmlcov",
+]
+# File extensions to index, per language
+extensions = { python = [".py"], javascript = [".js", ".mjs"] }
+# Max file size to parse (bytes)
+max_file_size = 524288  # 512 KB
+
+[graph]
+# Edge resolution methods and their default confidence scores
+confidence = { direct = 1.0, heuristic_name_match = 0.7, unresolved = 0.0 }
+# Max graph traversal depth for localization queries
+max_traversal_depth = 5
+
+[localization]
+# Scoring weights (must sum ≤ 1.0; remainder is unweighted residual)
+[localization.weights]
+stack_frame_exact   = 1.0   # Symbol appears directly in stack trace
+test_mention        = 0.9   # Symbol referenced in failing test
+caller_depth_1      = 0.6   # Direct caller of a known-bad symbol
+caller_depth_2      = 0.4   # Caller two hops away
+callee_depth_1      = 0.3   # Called by a known-bad symbol
+file_co_change      = 0.2   # Heuristic: file changed together historically
+top_k               = 10    # Number of candidates to return
+
+[context]
+# Token budget for context sent to LLM (rough estimate: chars / 4)
+token_budget = 8000
+# How many top candidates get full source (rest get signature only)
+full_source_top_k = 3
+
+[llm]
+adapter = "mock"  # mock | openai_compat
+# OpenAI-compatible settings (used when adapter = "openai_compat")
+base_url = "https://api.openai.com/v1"
+model = "gpt-4o-mini"
+temperature = 0.2
+max_tokens = 4096
+timeout_seconds = 60
+
+[verifier]
+max_retries = 3
+# isolation: "worktree" | "docker"
+isolation = "worktree"
+# Docker image to use when isolation = "docker"
+docker_image = "python:3.12-slim"
+# Test command to run inside the isolated environment
+test_command = "pytest tests/ -x --tb=short -q"
+test_timeout_seconds = 120
+
+[evaluator]
+output_dir = "eval_results"
+strategies = ["no_retrieval", "graph_retrieval"]
