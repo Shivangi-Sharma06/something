@@ -78,14 +78,26 @@ class OpenAICompatibleAdapter(ModelAdapter):
             raise RuntimeError(f"LLM call failed: {exc}") from exc
 
 
-def get_adapter(adapter_name: str | None = None) -> ModelAdapter:
-    """Factory: return the configured adapter by name."""
+def get_adapter(
+    adapter_name: str | None = None,
+    base_url: str | None = None,
+    api_key: str | None = None,
+    model: str | None = None,
+) -> ModelAdapter:
+    """Factory: return the configured adapter by name with optional overrides."""
     from graph_agent.llm.mock import MockAdapter
 
-    name = adapter_name or get_settings().llm.adapter
+    # If model/api_base is explicitly specified, automatically default to openai_compat
+    default_name = "openai_compat" if (model or base_url) else get_settings().llm.adapter
+    name = adapter_name or default_name
+
     if name == "mock":
         return MockAdapter()
     elif name == "openai_compat":
-        return OpenAICompatibleAdapter()
+        return OpenAICompatibleAdapter(
+            base_url=base_url,
+            api_key=api_key,
+            model=model,
+        )
     else:
         raise ValueError(f"Unknown adapter: {name!r}. Choose 'mock' or 'openai_compat'.")

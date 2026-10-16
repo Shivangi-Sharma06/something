@@ -298,5 +298,30 @@ def repair_cmd(repo_path: str, description: str, stack_trace: str,
     )
 
 
+# ---------------------------------------------------------------------------
+# graph-agent chat
+# ---------------------------------------------------------------------------
+@cli.command("chat")
+@click.argument("repo_path", type=click.Path(exists=True, file_okay=False))
+@click.option("--adapter", default=None, envvar="GRAPH_AGENT_LLM_ADAPTER",
+              help="LLM adapter: mock | openai_compat")
+@click.option("--model", default=None, envvar="OPENAI_MODEL",
+              help="Model name (e.g. qwen3-coder:30b, deepseek-coder-v2:16b, gpt-4o)")
+@click.option("--api-base", default=None, envvar="OPENAI_API_BASE",
+              help="API base URL (e.g. http://localhost:11434/v1 for Ollama, http://localhost:8000/v1 for vLLM)")
+@click.option("--api-key", default=None, envvar="OPENAI_API_KEY",
+              help="API key (defaults to 'EMPTY' for local Ollama/vLLM)")
+def chat_cmd(repo_path: str, adapter: str | None, model: str | None, api_base: str | None, api_key: str | None) -> None:
+    """Start an interactive chat session to inspect, localize, justify, and apply changes."""
+    from graph_agent.chat.session import run_chat_session
+    run_chat_session(
+        repo_path,
+        adapter_name=adapter,
+        model_name=model,
+        api_base=api_base,
+        api_key=api_key,
+    )
+
+
 if __name__ == "__main__":
     cli()
