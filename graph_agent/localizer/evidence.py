@@ -83,9 +83,31 @@ def _parse_test_name(failing_test: str) -> list[str]:
 # Symbol lookup helpers
 # ---------------------------------------------------------------------------
 def _find_by_name(session: Session, repo_id: int, name: str) -> list[Symbol]:
-    return (
+    if not name or len(name) < 2:
+        return []
+    # 1. Exact match first
+    exact = (
         session.query(Symbol)
         .filter_by(repo_id=repo_id, name=name)
+        .all()
+    )
+    if exact:
+        return exact
+
+    # 2. Case-insensitive name match
+    ci = (
+        session.query(Symbol)
+        .filter(Symbol.repo_id == repo_id, Symbol.name.ilike(name))
+        .all()
+    )
+    if ci:
+        return ci
+
+    # 3. Substring in qualified name or name (for general user prompts like "todo", "create", etc.)
+    return (
+        session.query(Symbol)
+        .filter(Symbol.repo_id == repo_id, Symbol.qualified_name.ilike(f"%{name}%"))
+        .limit(5)
         .all()
     )
 
@@ -170,10 +192,23 @@ def extract_evidence(
     # 3. Description keyword scan — HEURISTIC (lower weight)
     # ------------------------------------------------------------------
     if description:
-        # Find all potential identifiers in the description
-        idents = re.findall(r'\b([a-zA-Z_][a-zA-Z0-9_]{2,})\b', description)
+        # Find all potential identifiers / words in the description
+        idents = re.findall(r'\b([a-zA-Z_][a-zA-Z0-9_]{1,})\b', description)
         for ident in set(idents):
             for sym in _find_by_name(session, repo_id, ident):
                 _add(sym, EvidenceKind.HEURISTIC, "description_mention", weight=0.3)
+
+    # ------------------------------------------------------------------
+    # 4. Fallback for broad prompts: if description provided but nothing matched
+    # ------------------------------------------------------------------
+    if not items and description:
+        broad_syms = (
+            session.query(Symbol)
+            .filter(Symbol.repo_id == repo_id, Symbol.kind.in_(["function", "class", "method"]))
+            .limit(5)
+            .all()
+        )
+        for sym in broad_syms:
+            _add(sym, EvidenceKind.HEURISTIC, "repo_symbol_context", weight=0.1)
 
     return sorted(items.values(), key=lambda x: x.weight, reverse=True)

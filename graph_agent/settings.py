@@ -12,6 +12,7 @@ from pathlib import Path
 from functools import lru_cache
 from typing import Any
 
+from dotenv import load_dotenv
 from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
@@ -20,6 +21,10 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 _PKG_ROOT = Path(__file__).parent
 _PROJECT_ROOT = _PKG_ROOT.parent
 _TOML_PATH = _PROJECT_ROOT / "config" / "default.toml"
+_ENV_PATH = _PROJECT_ROOT / ".env"
+
+if _ENV_PATH.exists():
+    load_dotenv(dotenv_path=_ENV_PATH, override=True)
 
 
 def _load_toml() -> dict[str, Any]:

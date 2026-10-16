@@ -13,17 +13,23 @@ from graph_agent.llm.base import ModelAdapter
 log = logging.getLogger(__name__)
 
 SYSTEM_PROMPT = """\
-You are an expert software engineer performing automated bug repair.
-Given a bug report and relevant source code context, you will:
-1. Identify the root cause of the bug with a brief explanation.
-2. Produce a MINIMAL unified diff (git diff format) that fixes the bug.
+You are an expert software engineer performing automated code modifications and bug repair.
+Given the user prompt and relevant source code context, your output MUST follow this exact structure:
 
-Rules:
-- Fix only what is necessary. Do not refactor unrelated code.
-- The diff must be valid and apply cleanly with `git apply`.
-- Explain the root cause FIRST, then provide the diff.
-- Wrap the diff in a ```diff ... ``` code block.
-- Do not include any other code blocks.
+### Summary of Changes & Reasoning
+Provide a concise 2 to 4 sentence explanation:
+- What change you are making.
+- Why this change solves the user prompt based on the code context.
+
+### Unified Patch
+Produce a minimal unified diff inside a ```diff code block.
+
+Strict Diff Rules:
+- Header:
+  --- a/<filepath>
+  +++ b/<filepath>
+- Context lines must exactly match the source code provided in the prompt.
+- Do NOT output stream-of-consciousness thought traces. Keep the summary clear, professional, and brief.
 """
 
 
@@ -57,27 +63,35 @@ def build_repair_prompt(
     candidates: list[ScoredSymbol],
     context: SelectedContext,
 ) -> list[dict]:
-    """Build the OpenAI-style messages list for the repair request."""
+    # Collect full file contents for candidates so the model sees complete real code
+    file_sections = []
+    seen_files = set()
+    for slc in context.slices:
+        if slc.rel_path not in seen_files:
+            seen_files.add(slc.rel_path)
+            file_sections.append(
+                f"### File: {slc.rel_path}\n"
+                f"```python\n{slc.content}\n```"
+            )
+
     user_content = f"""\
-## Bug Report
+## User Request
+{description}
 
-**Description:** {description or "(none)"}
+{f"**Stack Trace:**\\n```\\n{stack_trace}\\n```" if stack_trace else ""}
+{f"**Failing Test:** `{failing_test}`" if failing_test else ""}
 
-**Stack Trace:**
-```
-{stack_trace or "(none)"}
-```
-
-**Failing Test:** `{failing_test or "(none)"}`
-
-## Suspicious Functions (ranked)
-{_format_candidates(candidates)}
-
-## Relevant Source Code
+## Code Context
 {_format_context(context)}
 
-## Task
-Identify the root cause and produce a minimal unified diff to fix the bug.
+## Instructions
+1. Provide a clear "Reasoning:" paragraph explaining:
+   - Why this change is needed.
+   - What logic is modified or added.
+2. Provide a unified diff inside ```diff ... ```:
+   - Header: `--- a/<filepath>` and `+++ b/<filepath>`
+   - Use the EXACT code from the Code Context above for unchanged context lines.
+   - Do NOT invent or assume different class structures.
 """
     return [
         {"role": "system", "content": SYSTEM_PROMPT},
@@ -95,12 +109,28 @@ class GeneratedPatch:
 
 def extract_patch(response: str) -> GeneratedPatch:
     """Parse the LLM response to extract root cause and diff."""
-    # Extract diff from ```diff ... ``` block
-    diff_match = re.search(r'```diff\s*\n(.*?)```', response, re.DOTALL)
+    # 1. Try ```diff ... ``` or ```patch ... ```
+    diff_match = re.search(r'```(?:diff|patch)\s*\n(.*?)```', response, re.DOTALL)
+    
+    # 2. Fallback: try any ``` block that contains --- a/ or @@
+    if not diff_match:
+        for block in re.finditer(r'```[a-zA-Z0-9_-]*\s*\n(.*?)```', response, re.DOTALL):
+            candidate = block.group(1).strip()
+            if "--- " in candidate or "@@" in candidate:
+                diff_match = block
+                break
+
     diff = diff_match.group(1).strip() if diff_match else ""
 
-    # Extract root cause: everything before the diff block (or first 500 chars)
-    root_cause = response.split("```diff")[0].strip() if "```diff" in response else response[:500]
+    # Extract root cause: text before the diff block
+    if diff_match:
+        root_cause = response[: diff_match.start()].strip()
+    else:
+        root_cause = response.strip()
+
+    # Clean up empty root cause
+    if not root_cause:
+        root_cause = "Code modification requested per prompt context."
 
     return GeneratedPatch(
         raw_response=response,

@@ -271,7 +271,7 @@ def run_chat_session(
         # Display Root Cause / Reasoning
         console.print(Panel(
             patch.root_cause.strip(),
-            title="[bold green]Why this patch? (LLM Root Cause & Rationale)[/bold green]",
+            title="[bold green]What & Why: LLM Rationale and Summary[/bold green]",
             border_style="green",
         ))
 
@@ -287,10 +287,12 @@ def run_chat_session(
             console.print(f"[bold yellow]⚠ Pre-validation note: {val.error}[/bold yellow]")
 
         # Phase 4: Human Approval
-        approved = Confirm.ask(
-            "[bold yellow]Do you approve applying this patch to your repository?[/bold yellow]",
-            default=False,
-        )
+        user_choice = Prompt.ask(
+            "\n[bold yellow]Do you approve applying this patch to your repository? (y/yes to apply, n/no to discard)[/bold yellow]",
+            default="n",
+        ).strip().lower()
+
+        approved = user_choice in ("y", "yes", "true", "1")
 
         if approved:
             applied, msg = apply_patch(repo_path, patch.diff)

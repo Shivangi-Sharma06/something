@@ -15,6 +15,9 @@ class TodoStore:
         self._next_id: int = 1
 
     def add(self, title: str) -> TodoItem:
+        todo = TodoItem(title=title)
+        self._todos.append(todo)
+        return todo
         if not title or not title.strip():
             raise ValueError("Title cannot be empty")
         item = TodoItem(id=self._next_id, title=title.strip())

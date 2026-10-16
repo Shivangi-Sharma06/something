@@ -71,7 +71,19 @@ class OpenAICompatibleAdapter(ModelAdapter):
                 temperature=temperature,
                 max_tokens=max_tokens,
             )
-            content = resp.choices[0].message.content or ""
+            # Some providers like OpenRouter return an error object inside ChatCompletion with choices=None
+            if not getattr(resp, "choices", None):
+                dump = resp.model_dump() if hasattr(resp, "model_dump") else str(resp)
+                raise RuntimeError(f"Model returned no choices: {dump}")
+            choice = resp.choices[0]
+            msg = choice.message
+            content = getattr(msg, "content", None) or ""
+            reasoning = getattr(msg, "reasoning", None) or ""
+
+            # Only use internal reasoning if content is completely empty
+            if not content.strip() and reasoning.strip():
+                content = reasoning.strip()
+
             log.debug("Got %d chars from LLM", len(content))
             return content
         except Exception as exc:

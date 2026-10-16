@@ -130,7 +130,7 @@ def localize(
             scores[ev.symbol_id].stack_frame_exact += w.stack_frame_exact
         elif ev.source == "failing_test":
             scores[ev.symbol_id].test_mention += w.test_mention
-        elif ev.source == "description_mention":
+        elif ev.source in ("description_mention", "repo_symbol_context"):
             scores[ev.symbol_id].description_mention += w.file_co_change
 
     # ------------------------------------------------------------------
