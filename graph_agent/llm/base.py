@@ -38,5 +38,9 @@ class ModelAdapter(ABC):
         """
         ...
 
+    def stream(self, messages: list[dict], **kwargs):
+        """Stream chunks from the model in real time. Defaults to yielding complete()."""
+        yield self.complete(messages, **kwargs)
+
     def __repr__(self) -> str:
         return f"{self.__class__.__name__}(name={self.name()!r})"

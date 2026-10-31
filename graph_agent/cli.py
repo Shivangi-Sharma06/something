@@ -154,6 +154,62 @@ def build_graph_cmd(repo_path: str, repo_id: int | None) -> None:
 
 
 # ---------------------------------------------------------------------------
+# graph-agent tree (Permanent AST Tree)
+# ---------------------------------------------------------------------------
+@cli.command("tree")
+@click.argument("repo_path", type=click.Path(exists=True, file_okay=False))
+def tree_cmd(repo_path: str) -> None:
+    """Display the permanent hierarchical AST tree of a repository."""
+    from pathlib import Path
+    from graph_agent.db.connection import get_session
+    from graph_agent.db.models import Repository
+    from graph_agent.indexer.ingester import index_repository
+    from graph_agent.graph.builder import build_graph
+    from graph_agent.graph.ast_tree import build_permanent_ast_tree
+
+    root = str(Path(repo_path).resolve())
+    with get_session() as session:
+        repo = session.query(Repository).filter_by(root_path=root).first()
+        if repo is None:
+            console.print(f"[cyan]Repo not yet indexed. Indexing {root}...[/cyan]")
+            index_repository(session, root)
+            repo = session.query(Repository).filter_by(root_path=root).first()
+            build_graph(session, repo.id)
+
+        ast_tree = build_permanent_ast_tree(session, repo.id)
+        console.print(ast_tree.to_rich_tree())
+
+
+# ---------------------------------------------------------------------------
+# graph-agent decision-tree (Temporary Decision Tree)
+# ---------------------------------------------------------------------------
+@cli.command("decision-tree")
+@click.argument("repo_path", type=click.Path(exists=True, file_okay=False))
+@click.option("--prompt", default="", help="Prompt or task to build decision tree for")
+@click.option("--top-k", default=5, show_default=True, help="Top-K candidates")
+def decision_tree_cmd(repo_path: str, prompt: str, top_k: int) -> None:
+    """Build and display the temporary decision tree for a prompt or bug description."""
+    from pathlib import Path
+    from graph_agent.db.connection import get_session
+    from graph_agent.db.models import Repository
+    from graph_agent.indexer.ingester import index_repository
+    from graph_agent.graph.builder import build_graph
+    from graph_agent.graph.decision_tree import build_temporary_decision_tree
+
+    root = str(Path(repo_path).resolve())
+    with get_session() as session:
+        repo = session.query(Repository).filter_by(root_path=root).first()
+        if repo is None:
+            console.print(f"[cyan]Indexing {root}...[/cyan]")
+            index_repository(session, root)
+            repo = session.query(Repository).filter_by(root_path=root).first()
+            build_graph(session, repo.id)
+
+        dt, context, _ = build_temporary_decision_tree(session, repo.id, prompt, top_k=top_k)
+        console.print(dt.to_rich_tree())
+
+
+# ---------------------------------------------------------------------------
 # graph-agent localize
 # ---------------------------------------------------------------------------
 @cli.command("localize")
@@ -299,20 +355,44 @@ def repair_cmd(repo_path: str, description: str, stack_trace: str,
 
 
 # ---------------------------------------------------------------------------
+# graph-agent models
+# ---------------------------------------------------------------------------
+@cli.command("models")
+@click.option("--api-base", default=None, envvar="OLLAMA_API_BASE",
+              help="Ollama API base URL (defaults to http://localhost:11434/v1)")
+def models_cmd(api_base: str | None) -> None:
+    """List local models available in the local Ollama instance."""
+    from graph_agent.llm.ollama import list_ollama_models, get_ollama_host_url
+    host = get_ollama_host_url(api_base)
+    models = list_ollama_models(host)
+    console.print(f"[bold cyan]Local Ollama instance:[/bold cyan] {host}")
+    if not models:
+        console.print("[yellow]No local models found or Ollama server is not running.[/yellow]")
+        console.print("[dim]Run 'ollama serve' and 'ollama pull gptoss:20b' to get started.[/dim]")
+    else:
+        t = Table(title="Installed Ollama Models", show_header=True)
+        t.add_column("#", justify="right")
+        t.add_column("Model Name", style="bold green")
+        for i, m in enumerate(models, 1):
+            t.add_row(str(i), m)
+        console.print(t)
+
+
+# ---------------------------------------------------------------------------
 # graph-agent chat
 # ---------------------------------------------------------------------------
 @cli.command("chat")
 @click.argument("repo_path", type=click.Path(exists=True, file_okay=False))
 @click.option("--adapter", default=None, envvar="GRAPH_AGENT_LLM_ADAPTER",
-              help="LLM adapter: mock | openai_compat")
-@click.option("--model", default=None, envvar="OPENAI_MODEL",
-              help="Model name (e.g. qwen3-coder:30b, deepseek-coder-v2:16b, gpt-4o)")
-@click.option("--api-base", default=None, envvar="OPENAI_API_BASE",
-              help="API base URL (e.g. http://localhost:11434/v1 for Ollama, http://localhost:8000/v1 for vLLM)")
+              help="LLM adapter: ollama | openai_compat | mock")
+@click.option("--model", default=None, envvar="OLLAMA_MODEL",
+              help="Ollama model name (e.g. gptoss:20b, llama3). If omitted, an interactive dropdown is shown.")
+@click.option("--api-base", default=None, envvar="OLLAMA_API_BASE",
+              help="Ollama API base URL (e.g. http://localhost:11434/v1)")
 @click.option("--api-key", default=None, envvar="OPENAI_API_KEY",
-              help="API key (defaults to 'EMPTY' for local Ollama/vLLM)")
+              help="Optional API key (defaults to 'ollama')")
 def chat_cmd(repo_path: str, adapter: str | None, model: str | None, api_base: str | None, api_key: str | None) -> None:
-    """Start an interactive chat session to inspect, localize, justify, and apply changes."""
+    """Start an interactive chat session with real-time prompt rendering and local Ollama models."""
     from graph_agent.chat.session import run_chat_session
     run_chat_session(
         repo_path,

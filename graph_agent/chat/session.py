@@ -2,82 +2,61 @@
 
 Workflow:
 1. One-time permanent AST repository graph construction & persistence in PostgreSQL.
-2. User provides prompt/task in an interactive chat session.
-3. Localizer & Graph Traversal extract a temporary Decision Subgraph:
+2. User provides prompt/task in an interactive chat session (or types /tree, /ast to view permanent AST).
+3. System builds a Temporary Decision Tree:
    - Reasons why specific files & symbols are considered
-   - Shows callers, callees, and exact line ranges targeted
-4. LLM proposes a minimal unified diff patch with explicit step-by-step reasoning.
-5. User reviews the explanation and the diff.
-6. Upon user confirmation (approve / y), the patch is applied directly to the repo.
+   - Shows caller/callee links, confidence scores, and line ranges targeted
+4. Real-time prompt & repository context rendering.
+5. Real-time streaming response from the LLM.
+6. For questions/inquiries: delivers full architectural answer.
+   For bug fixes/refactors: provides step-by-step reasoning + unified diff, pre-validates cleanly,
+   and upon user confirmation (y/yes), applies patch directly to the repository.
 """
 
 from __future__ import annotations
 
 import logging
-from dataclasses import dataclass, field
+import sys
 from pathlib import Path
 from typing import Any
 
 from rich.console import Console
-from rich.table import Table
 from rich.panel import Panel
 from rich.tree import Tree
-from rich.prompt import Prompt, Confirm
+from rich.prompt import Prompt
 from rich.syntax import Syntax
+from rich.live import Live
+from rich.text import Text
 
 from graph_agent.db.connection import get_session
-from graph_agent.db.models import Repository, File, Symbol, Edge
+from graph_agent.db.models import Repository
 from graph_agent.graph.builder import build_graph
+from graph_agent.graph.ast_tree import build_permanent_ast_tree, PermanentASTTree
+from graph_agent.graph.decision_tree import build_temporary_decision_tree, TemporaryDecisionTree
 from graph_agent.indexer.ingester import index_repository
-from graph_agent.localizer.ranker import localize, ScoredSymbol
-from graph_agent.graph.queries import get_callers, get_callees
-from graph_agent.context.selector import BudgetContextSelector
 from graph_agent.llm.base import ModelAdapter
 from graph_agent.llm.openai_compat import get_adapter
-from graph_agent.patch.generator import generate_patch
+from graph_agent.patch.generator import generate_patch, generate_answer, extract_patch
 from graph_agent.patch.validator import validate_patch, apply_patch
+from graph_agent.llm.ollama import select_ollama_model
 from graph_agent.settings import get_settings
 
 console = Console()
 log = logging.getLogger(__name__)
 
 
-@dataclass
-class DecisionNode:
-    symbol_id: int
-    qualified_name: str
-    kind: str
-    rel_path: str
-    line_start: int | None
-    line_end: int | None
-    score: float
-    reason: str
-    evidence_kind: str
-    callers: list[dict[str, Any]] = field(default_factory=list)
-    callees: list[dict[str, Any]] = field(default_factory=list)
-
-
-@dataclass
-class DecisionGraph:
-    prompt: str
-    repo_root: str
-    target_files: set[str]
-    nodes: list[DecisionNode]
-    summary_explanation: str
-
-
-def ensure_permanent_graph(repo_path: str | Path, name: str | None = None) -> int:
-    """Ensures the repository is parsed once with Tree-sitter and stored in PostgreSQL.
+def ensure_permanent_graph(repo_path: str | Path, name: str | None = None) -> tuple[int, PermanentASTTree]:
+    """Ensures the repository is parsed with Tree-sitter and stored in PostgreSQL.
     
     If not already indexed, parses all files, stores AST symbols, and resolves edges.
-    Returns repo_id.
+    Returns (repo_id, ast_tree).
     """
     repo_root = str(Path(repo_path).resolve())
     with get_session() as session:
         repo = session.query(Repository).filter_by(root_path=repo_root).first()
         if repo is None:
             console.print(f"[cyan]Indexing repository at {repo_root} (Tree-sitter AST)...[/cyan]")
-            result = index_repository(session, repo_root, name=name or Path(repo_root).name)
+            result = index_repository(session, repo_root, repo_name=name or Path(repo_root).name)
             repo = session.query(Repository).filter_by(root_path=repo_root).first()
             console.print(f"[green]✓ Indexed {result.files_indexed} files, {result.symbols_upserted} symbols in PostgreSQL.[/green]")
         
@@ -88,108 +67,28 @@ def ensure_permanent_graph(repo_path: str | Path, name: str | None = None) -> in
             f"[green]✓ Code graph ready: {g_result.contains_edges} CONTAINS edges, "
             f"{g_result.edges_resolved} CALLS resolved.[/green]"
         )
-        return repo.id
+
+        ast_tree = build_permanent_ast_tree(session, repo.id)
+        return repo.id, ast_tree
 
 
-def build_temporary_decision_graph(
-    session,
-    repo_id: int,
-    user_prompt: str,
-    top_k: int = 5,
-) -> DecisionGraph:
-    """Extracts a temporary decision subgraph answering WHY specific files and symbols
+def display_prompt_and_context(prompt: str, dt: TemporaryDecisionTree, context: Any) -> None:
+    """Renders the constructed prompt and repository context in real time before calling the LLM."""
+    slices_desc = []
+    if hasattr(context, "slices") and context.slices:
+        for slc in context.slices:
+            kind_lbl = "full source" if slc.is_full else "signature"
+            slices_desc.append(f"• [cyan]{slc.rel_path}[/cyan] ({slc.qualified_name}, L{slc.line_start}-L{slc.line_end}) [{kind_lbl}]")
+    else:
+        slices_desc.append("• [dim]Repository structural summary / symbol scope[/dim]")
 
-    were chosen based on user prompt and graph connectivity.
-    """
-    repo = session.query(Repository).filter_by(id=repo_id).first()
-    repo_root = repo.root_path if repo else ""
-
-    # Parse potential stack trace or test references inside the prompt
-    candidates: list[ScoredSymbol] = localize(
-        session,
-        repo_id,
-        description=user_prompt,
-        stack_trace=user_prompt if "Traceback" in user_prompt or "line " in user_prompt else "",
-        failing_test=user_prompt if "test_" in user_prompt else "",
-        top_k=top_k,
+    context_text = "\n".join(slices_desc)
+    panel_content = (
+        f"[bold yellow]Request:[/bold yellow] {prompt}\n\n"
+        f"[bold green]Repository Context Injected ({dt.tokens_used} est. tokens):[/bold green]\n"
+        f"{context_text}"
     )
-
-    decision_nodes: list[DecisionNode] = []
-    target_files: set[str] = set()
-
-    for cand in candidates:
-        sym = session.query(Symbol).filter_by(id=cand.symbol_id).first()
-        if not sym:
-            continue
-        
-        file_obj = session.query(File).filter_by(id=sym.file_id).first()
-        rel_path = file_obj.rel_path if file_obj else "unknown"
-        target_files.add(rel_path)
-
-        # Callers & callees
-        callers = get_callers(session, repo_id, sym.id, max_depth=1)
-        callees = get_callees(session, repo_id, sym.id, max_depth=1)
-
-        reason = (
-            f"Matched via {cand.evidence_source} ({cand.evidence_kind.value}) "
-            f"with confidence score {cand.score:.2f}."
-        )
-        if callers:
-            reason += f" Called by: {', '.join(c['qualified_name'] for c in callers[:2])}."
-        if callees:
-            reason += f" Calls: {', '.join(c['qualified_name'] for c in callees[:2])}."
-
-        decision_nodes.append(DecisionNode(
-            symbol_id=sym.id,
-            qualified_name=cand.qualified_name,
-            kind=sym.kind,
-            rel_path=rel_path,
-            line_start=sym.line_start,
-            line_end=sym.line_end,
-            score=cand.score,
-            reason=reason,
-            evidence_kind=cand.evidence_kind.value,
-            callers=callers,
-            callees=callees,
-        ))
-
-    explanation = (
-        f"Selected {len(target_files)} file(s) ({', '.join(target_files)}) "
-        f"and {len(decision_nodes)} target symbol(s) based on structural caller/callee traversal."
-    )
-
-    return DecisionGraph(
-        prompt=user_prompt,
-        repo_root=repo_root,
-        target_files=target_files,
-        nodes=decision_nodes,
-        summary_explanation=explanation,
-    )
-
-
-def display_decision_graph(dg: DecisionGraph) -> None:
-    """Renders the decision graph visually to the user in the terminal."""
-    tree = Tree(f"[bold magenta]Temporary Decision Graph[/bold magenta] (Targeting {len(dg.target_files)} file(s))")
-
-    for f in dg.target_files:
-        file_node = tree.add(f"[bold cyan]File: {f}[/bold cyan]")
-        for n in dg.nodes:
-            if n.rel_path == f:
-                lines = f"L{n.line_start}-L{n.line_end}" if n.line_start else "whole file"
-                sym_label = f"[green]{n.qualified_name}[/green] ({n.kind}, {lines}) [Score: {n.score:.2f}]"
-                sym_node = file_node.add(sym_label)
-                sym_node.add(f"[dim]Rationale: {n.reason}[/dim]")
-                if n.callers:
-                    callers_label = sym_node.add("[yellow]Callers (who calls this):[/yellow]")
-                    for c in n.callers:
-                        callers_label.add(f"<- {c['qualified_name']}")
-                if n.callees:
-                    callees_label = sym_node.add("[yellow]Callees (what this calls):[/yellow]")
-                    for c in n.callees:
-                        callees_label.add(f"-> {c['qualified_name']}")
-
-    console.print(tree)
-    console.print(Panel(dg.summary_explanation, title="Decision Rationale", border_style="blue"))
+    console.print(Panel(panel_content, title="[bold]Real-Time Prompt & Context Preview[/bold]", border_style="blue"))
 
 
 def run_chat_session(
@@ -200,29 +99,46 @@ def run_chat_session(
     api_key: str | None = None,
     interactive: bool = True,
 ) -> None:
-    """Runs an interactive chat loop with the LLM to inspect, localize, generate,
+    """Runs an interactive chat loop with real-time prompt rendering, AST & decision trees,
 
-    justify, and apply patches with human approval.
+    and streaming LLM responses.
     """
     repo_path = Path(repo_path).resolve()
+    s = get_settings()
+    effective_adapter = adapter_name or os.environ.get("GRAPH_AGENT_LLM_ADAPTER") or s.llm.adapter
+
+    # If using local ollama and model not explicitly specified, prompt user with interactive dropdown
+    if effective_adapter == "ollama" and not model_name and interactive:
+        model_name = select_ollama_model(default_model="gptoss:20b", host_url=api_base, interactive=True)
+    elif not model_name:
+        model_name = os.environ.get("OLLAMA_MODEL") or os.environ.get("OPENAI_MODEL") or s.llm.model
+
     console.print(Panel.fit(
         f"[bold green]Graph-Based Coding Agent Interactive Chat[/bold green]\n"
         f"Repository: [cyan]{repo_path}[/cyan]\n"
-        f"Commands: Type your change request / prompt. Type [bold yellow]exit[/bold yellow] or [bold yellow]quit[/bold yellow] to leave.",
+        f"Model: [bold yellow]{model_name}[/bold yellow] via [cyan]{effective_adapter}[/cyan]\n"
+        f"Commands:\n"
+        f"  • Type your prompt/request.\n"
+        f"  • Type [bold yellow]/model[/bold yellow] to switch local Ollama model.\n"
+        f"  • Type [bold yellow]/tree[/bold yellow] to view permanent AST tree.\n"
+        f"  • Type [bold yellow]exit[/bold yellow] to quit.",
         border_style="green",
     ))
 
     # Phase 1: Permanent AST graph
-    repo_id = ensure_permanent_graph(repo_path)
-    s = get_settings()
+    repo_id, ast_tree = ensure_permanent_graph(repo_path)
     llm: ModelAdapter = get_adapter(
-        adapter_name=adapter_name,
+        adapter_name=effective_adapter,
         model=model_name,
         base_url=api_base,
         api_key=api_key,
     )
 
-    console.print(f"[bold cyan]LLM adapter connected:[/bold cyan] {llm.name()}\n")
+    console.print(f"[bold cyan]LLM adapter connected:[/bold cyan] {llm.name()}")
+    console.print(
+        f"[dim]Permanent AST indexed: {ast_tree.total_files} files, {ast_tree.total_symbols} symbols, "
+        f"{ast_tree.total_edges} edges in PostgreSQL.[/dim]\n"
+    )
 
     while True:
         try:
@@ -237,73 +153,108 @@ def run_chat_session(
             console.print("[yellow]Exiting chat session.[/yellow]")
             break
 
+        # User wants to switch Ollama model
+        if user_prompt.lower() in ("/model", "/models", "/switch", "model"):
+            new_model = select_ollama_model(default_model=model_name or "gptoss:20b", host_url=api_base, interactive=True)
+            if new_model:
+                model_name = new_model
+                llm = get_adapter(
+                    adapter_name=effective_adapter,
+                    model=model_name,
+                    base_url=api_base,
+                    api_key=api_key,
+                )
+                console.print(f"[bold green]✓ Active model switched to:[/bold green] [bold cyan]{model_name}[/bold cyan] ({llm.name()})\n")
+            continue
+
+        # User wants to inspect permanent AST tree
+        if user_prompt.lower() in ("/tree", "/ast", "tree", "show tree"):
+            with get_session() as session:
+                tree = build_permanent_ast_tree(session, repo_id)
+                console.print(tree.to_rich_tree())
+            continue
+
         console.print("\n[cyan]Analyzing request & querying structural code graph...[/cyan]")
 
         with get_session() as session:
-            # Phase 2: Temporary decision graph
-            decision_graph = build_temporary_decision_graph(session, repo_id, user_prompt, top_k=5)
-            display_decision_graph(decision_graph)
+            # Phase 2: Build Temporary Decision Tree
+            decision_tree, context, candidates = build_temporary_decision_tree(
+                session, repo_id, user_prompt, top_k=5
+            )
 
-            if not decision_graph.nodes:
-                console.print("[yellow]No relevant symbols found. Try refining your prompt or referencing function/file names.[/yellow]")
-                continue
+            # Display the Temporary Decision Tree
+            console.print(decision_tree.to_rich_tree())
 
-            # Phase 3: Build context & call LLM
-            candidates = localize(session, repo_id, description=user_prompt, top_k=5)
-            context = BudgetContextSelector().select(session, repo_id, candidates, s.context.token_budget)
+            # Phase 3: Real-time Prompt & Repository Context Preview
+            display_prompt_and_context(user_prompt, decision_tree, context)
 
-        console.print("\n[cyan]Generating patch with reasoning from the decision graph...[/cyan]")
-        patch = generate_patch(
-            adapter=llm,
-            description=user_prompt,
-            stack_trace=user_prompt if "Traceback" in user_prompt else "",
-            failing_test=user_prompt if "test_" in user_prompt else "",
-            candidates=candidates,
-            context=context,
-        )
+        # Phase 4: Stream response in real time
+        console.print("\n[bold cyan]LLM Response (Streaming in real time):[/bold cyan]")
+        console.print("─" * 60)
 
-        if not patch.is_valid or not patch.diff.strip():
-            console.print("[red]LLM could not formulate a valid unified diff.[/red]")
-            if patch.root_cause:
-                console.print(Panel(patch.root_cause, title="LLM Response", border_style="red"))
+        chunks: list[str] = []
+
+        def _stream_cb(chunk: str) -> None:
+            chunks.append(chunk)
+            sys.stdout.write(chunk)
+            sys.stdout.flush()
+
+        try:
+            if decision_tree.intent in ("repair", "refactor"):
+                patch = generate_patch(
+                    adapter=llm,
+                    description=user_prompt,
+                    stack_trace=user_prompt if "Traceback" in user_prompt else "",
+                    failing_test=user_prompt if "test_" in user_prompt else "",
+                    candidates=candidates,
+                    context=context,
+                    decision_tree_reasoning=decision_tree.to_prompt_context(),
+                    stream_chunk_cb=_stream_cb,
+                )
+            else:
+                full_text = generate_answer(
+                    adapter=llm,
+                    description=user_prompt,
+                    context=context,
+                    decision_tree_reasoning=decision_tree.to_prompt_context(),
+                    stream_chunk_cb=_stream_cb,
+                )
+                patch = extract_patch(full_text)
+        except Exception as exc:
+            console.print(f"\n[red]Error generating response: {exc}[/red]")
             continue
 
-        # Display Root Cause / Reasoning
-        console.print(Panel(
-            patch.root_cause.strip(),
-            title="[bold green]What & Why: LLM Rationale and Summary[/bold green]",
-            border_style="green",
-        ))
+        console.print("\n" + "─" * 60)
 
-        # Display Diff
-        syntax = Syntax(patch.diff, "diff", theme="monokai", line_numbers=True)
-        console.print(Panel(syntax, title="Proposed Patch", border_style="cyan"))
+        # Phase 5: If a code patch was generated, validate and offer application
+        if patch and patch.is_valid and patch.diff.strip():
+            # Display formatted patch diff
+            syntax = Syntax(patch.diff, "diff", theme="monokai", line_numbers=True)
+            console.print(Panel(syntax, title="[bold cyan]Proposed Patch Diff[/bold cyan]", border_style="cyan"))
 
-        # Pre-validate patch cleanly in isolation
-        val = validate_patch(repo_path, patch.diff)
-        if val.applies_cleanly:
-            console.print("[bold green]✓ Pre-validation check: Patch applies cleanly to the codebase.[/bold green]")
-        else:
-            console.print(f"[bold yellow]⚠ Pre-validation note: {val.error}[/bold yellow]")
-
-        # Phase 4: Human Approval
-        user_choice = Prompt.ask(
-            "\n[bold yellow]Do you approve applying this patch to your repository? (y/yes to apply, n/no to discard)[/bold yellow]",
-            default="n",
-        ).strip().lower()
-
-        approved = user_choice in ("y", "yes", "true", "1")
-
-        if approved:
-            applied, msg = apply_patch(repo_path, patch.diff)
-            if applied:
-                console.print(f"[bold green]✔ Patch applied successfully to {repo_path}![/bold green]")
-                console.print("[dim]Re-indexing updated file(s) into graph...[/dim]")
-                with get_session() as session:
-                    index_repository(session, str(repo_path))
-                    build_graph(session, repo_id)
-                console.print("[green]✓ Graph synchronized with applied changes.[/green]")
+            # Pre-validate patch
+            val = validate_patch(repo_path, patch.diff)
+            if val.applies_cleanly:
+                console.print("[bold green]✓ Pre-validation check: Patch applies cleanly to the repository.[/bold green]")
             else:
-                console.print(f"[red]Failed to apply patch: {msg}[/red]")
-        else:
-            console.print("[yellow]Patch discarded. Repository was not modified.[/yellow]")
+                console.print(f"[bold yellow]⚠ Pre-validation note: {val.error}[/bold yellow]")
+
+            # Ask user confirmation
+            user_choice = Prompt.ask(
+                "\n[bold yellow]Apply this patch to your repository? (y/yes to apply, n/no to discard)[/bold yellow]",
+                default="n",
+            ).strip().lower()
+
+            if user_choice in ("y", "yes", "true", "1"):
+                applied, msg = apply_patch(repo_path, patch.diff)
+                if applied:
+                    console.print(f"[bold green]✔ Patch applied successfully to {repo_path}![/bold green]")
+                    console.print("[dim]Updating permanent AST graph in PostgreSQL...[/dim]")
+                    with get_session() as session:
+                        index_repository(session, str(repo_path))
+                        build_graph(session, repo_id)
+                    console.print("[green]✓ Permanent AST graph synchronized.[/green]")
+                else:
+                    console.print(f"[red]Failed to apply patch: {msg}[/red]")
+            else:
+                console.print("[yellow]Patch discarded. Repository was not modified.[/yellow]")

@@ -56,23 +56,37 @@ def _format_candidates(candidates: list[ScoredSymbol]) -> str:
     return "\n".join(lines)
 
 
+from typing import Callable, Optional
+
+SYSTEM_QA_PROMPT = """\
+You are an expert software engineer assistant analyzing a software repository.
+Answer the user's question accurately using the provided code context and decision tree reasoning.
+Provide clear explanations, exact code references, file names, line numbers, and architectural context.
+"""
+
+
 def build_repair_prompt(
     description: str,
-    stack_trace: str,
-    failing_test: str,
-    candidates: list[ScoredSymbol],
-    context: SelectedContext,
+    stack_trace: str = "",
+    failing_test: str = "",
+    candidates: list[ScoredSymbol] | None = None,
+    context: SelectedContext | None = None,
+    decision_tree_reasoning: str | None = None,
 ) -> list[dict]:
     # Collect full file contents for candidates so the model sees complete real code
     file_sections = []
     seen_files = set()
-    for slc in context.slices:
-        if slc.rel_path not in seen_files:
-            seen_files.add(slc.rel_path)
-            file_sections.append(
-                f"### File: {slc.rel_path}\n"
-                f"```python\n{slc.content}\n```"
-            )
+    if context:
+        for slc in context.slices:
+            if slc.rel_path not in seen_files:
+                seen_files.add(slc.rel_path)
+                file_sections.append(
+                    f"### File: {slc.rel_path}\n"
+                    f"```python\n{slc.content}\n```"
+                )
+
+    code_ctx = _format_context(context) if context else ""
+    dt_section = f"\n\n{decision_tree_reasoning}" if decision_tree_reasoning else ""
 
     user_content = f"""\
 ## User Request
@@ -80,9 +94,10 @@ def build_repair_prompt(
 
 {f"**Stack Trace:**\\n```\\n{stack_trace}\\n```" if stack_trace else ""}
 {f"**Failing Test:** `{failing_test}`" if failing_test else ""}
+{dt_section}
 
 ## Code Context
-{_format_context(context)}
+{code_ctx}
 
 ## Instructions
 1. Provide a clear "Reasoning:" paragraph explaining:
@@ -95,6 +110,30 @@ def build_repair_prompt(
 """
     return [
         {"role": "system", "content": SYSTEM_PROMPT},
+        {"role": "user", "content": user_content},
+    ]
+
+
+def build_qa_prompt(
+    description: str,
+    context: SelectedContext | None = None,
+    decision_tree_reasoning: str | None = None,
+) -> list[dict]:
+    code_ctx = _format_context(context) if context else ""
+    dt_section = f"\n\n{decision_tree_reasoning}" if decision_tree_reasoning else ""
+
+    user_content = f"""\
+## Question / Inquiry
+{description}
+{dt_section}
+
+## Code Context from Repository
+{code_ctx}
+
+Please provide a detailed, accurate response based on the repository source code and structural relationships above.
+"""
+    return [
+        {"role": "system", "content": SYSTEM_QA_PROMPT},
         {"role": "user", "content": user_content},
     ]
 
@@ -143,22 +182,57 @@ def extract_patch(response: str) -> GeneratedPatch:
 def generate_patch(
     adapter: ModelAdapter,
     description: str,
-    stack_trace: str,
-    failing_test: str,
-    candidates: list[ScoredSymbol],
-    context: SelectedContext,
+    stack_trace: str = "",
+    failing_test: str = "",
+    candidates: list[ScoredSymbol] | None = None,
+    context: SelectedContext | None = None,
+    decision_tree_reasoning: str | None = None,
+    stream_chunk_cb: Callable[[str], None] | None = None,
 ) -> GeneratedPatch:
-    """Call the LLM and return the parsed patch."""
+    """Call the LLM and return the parsed patch, optionally streaming chunks in real time."""
     messages = build_repair_prompt(
         description=description,
         stack_trace=stack_trace,
         failing_test=failing_test,
-        candidates=candidates,
-        context=context,
+        candidates=candidates or [],
+        context=context or SelectedContext(),
+        decision_tree_reasoning=decision_tree_reasoning,
     )
     log.info("Calling %s for patch generation ...", adapter.name())
-    response = adapter.complete(messages)
+    if stream_chunk_cb is not None:
+        chunks = []
+        for chunk in adapter.stream(messages):
+            stream_chunk_cb(chunk)
+            chunks.append(chunk)
+        response = "".join(chunks)
+    else:
+        response = adapter.complete(messages)
+
     patch = extract_patch(response)
     if not patch.is_valid:
         log.warning("LLM response did not contain a valid diff block")
     return patch
+
+
+def generate_answer(
+    adapter: ModelAdapter,
+    description: str,
+    context: SelectedContext | None = None,
+    decision_tree_reasoning: str | None = None,
+    stream_chunk_cb: Callable[[str], None] | None = None,
+) -> str:
+    """Call the LLM for Q&A / repository understanding with real-time streaming."""
+    messages = build_qa_prompt(
+        description=description,
+        context=context or SelectedContext(),
+        decision_tree_reasoning=decision_tree_reasoning,
+    )
+    log.info("Calling %s for Q&A ...", adapter.name())
+    if stream_chunk_cb is not None:
+        chunks = []
+        for chunk in adapter.stream(messages):
+            stream_chunk_cb(chunk)
+            chunks.append(chunk)
+        return "".join(chunks)
+    else:
+        return adapter.complete(messages)

@@ -44,13 +44,13 @@ token_budget = 8000
 full_source_top_k = 3
 
 [llm]
-adapter = "mock"  # mock | openai_compat
-# OpenAI-compatible settings (used when adapter = "openai_compat")
-base_url = "https://api.openai.com/v1"
-model = "gpt-4o-mini"
+adapter = "ollama"  # ollama | openai_compat | mock
+# Local Ollama settings
+base_url = "http://localhost:11434/v1"
+model = "gptoss:20b"
 temperature = 0.2
 max_tokens = 4096
-timeout_seconds = 60
+timeout_seconds = 120
 
 [verifier]
 max_retries = 3

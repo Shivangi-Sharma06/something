@@ -89,6 +89,31 @@ class OpenAICompatibleAdapter(ModelAdapter):
         except Exception as exc:
             raise RuntimeError(f"LLM call failed: {exc}") from exc
 
+    def stream(self, messages: list[dict], **kwargs):
+        temperature = kwargs.get("temperature", self._temperature)
+        max_tokens = kwargs.get("max_tokens", self._max_tokens)
+
+        log.debug("Streaming %s model=%s tokens=%d", self._base_url, self._model, max_tokens)
+
+        try:
+            stream_resp = self._client.chat.completions.create(
+                model=self._model,
+                messages=messages,
+                temperature=temperature,
+                max_tokens=max_tokens,
+                stream=True,
+            )
+            for chunk in stream_resp:
+                if chunk.choices and chunk.choices[0].delta:
+                    delta = chunk.choices[0].delta
+                    content = getattr(delta, "content", None) or ""
+                    if not content and hasattr(delta, "reasoning"):
+                        content = getattr(delta, "reasoning", "") or ""
+                    if content:
+                        yield content
+        except Exception as exc:
+            raise RuntimeError(f"LLM streaming call failed: {exc}") from exc
+
 
 def get_adapter(
     adapter_name: str | None = None,
@@ -105,6 +130,9 @@ def get_adapter(
 
     if name == "mock":
         return MockAdapter()
+    elif name == "ollama":
+        from graph_agent.llm.ollama import OllamaAdapter
+        return OllamaAdapter(base_url=base_url, model=model)
     elif name == "openai_compat":
         return OpenAICompatibleAdapter(
             base_url=base_url,
@@ -112,4 +140,4 @@ def get_adapter(
             model=model,
         )
     else:
-        raise ValueError(f"Unknown adapter: {name!r}. Choose 'mock' or 'openai_compat'.")
+        raise ValueError(f"Unknown adapter: {name!r}. Choose 'ollama', 'mock', or 'openai_compat'.")

@@ -87,13 +87,13 @@ class ContextSettings(BaseSettings):
 class LLMSettings(BaseSettings):
     model_config = SettingsConfigDict(env_prefix="GRAPH_AGENT_LLM_")
 
-    adapter: str = "mock"
-    base_url: str = "https://api.openai.com/v1"
-    model: str = "gpt-4o-mini"
+    adapter: str = "ollama"
+    base_url: str = "http://localhost:11434/v1"
+    model: str = "gptoss:20b"
     temperature: float = 0.2
     max_tokens: int = 4096
-    timeout_seconds: int = 60
-    # api_key intentionally loaded from OPENAI_API_KEY env var by the adapter
+    timeout_seconds: int = 120
+    # api_key intentionally loaded from environment variables
 
 
 class VerifierSettings(BaseSettings):
