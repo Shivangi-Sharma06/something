@@ -28,10 +28,107 @@ class ValidationResult:
     error: str
 
 
+def _recalculate_hunk_header(hunk_lines: list[str]) -> str:
+    """Calculate correct @@ -orig_start,orig_count +new_start,new_count @@ for a hunk."""
+    old_count = sum(1 for line in hunk_lines if line.startswith(" ") or line.startswith("-"))
+    new_count = sum(1 for line in hunk_lines if line.startswith(" ") or line.startswith("+"))
+    return f"@@ -1,{old_count} +1,{new_count} @@"
+
+
 def _normalize_diff(diff: str) -> str:
-    """Ensure diff ends with newline and clean whitespace."""
+    """Ensure diff has valid git unified diff headers and clean hunk lines."""
     lines = diff.strip().splitlines()
-    return "\n".join(lines) + "\n"
+    if not lines:
+        return ""
+
+    cleaned_lines = []
+    in_hunk = False
+    current_hunk_lines: list[str] = []
+
+    def flush_hunk(recompute: bool = False):
+        nonlocal current_hunk_lines
+        if not current_hunk_lines:
+            return
+        if recompute:
+            old_c = sum(1 for l in current_hunk_lines if l.startswith(" ") or l.startswith("-"))
+            new_c = sum(1 for l in current_hunk_lines if l.startswith(" ") or l.startswith("+"))
+            cleaned_lines.append(f"@@ -1,{old_c} +1,{new_c} @@")
+        cleaned_lines.extend(current_hunk_lines)
+        current_hunk_lines = []
+
+    for line in lines:
+        if line.startswith("--- ") or line.startswith("+++ "):
+            flush_hunk()
+            in_hunk = False
+            # Ensure standard a/ b/ prefixes
+            if line.startswith("--- ") and not re.match(r"^--- [ab]/", line):
+                path_part = line[4:].strip().lstrip("/")
+                cleaned_lines.append(f"--- a/{path_part}")
+            elif line.startswith("+++ ") and not re.match(r"^\+\+\+ [ab]/", line):
+                path_part = line[4:].strip().lstrip("/")
+                cleaned_lines.append(f"+++ b/{path_part}")
+            else:
+                cleaned_lines.append(line)
+        elif line.startswith("@@"):
+            flush_hunk()
+            in_hunk = True
+            # Check if @@ has valid counts
+            hunk_header_match = re.match(r"^@@\s+-\d+(?:,\d+)?\s+\+\d+(?:,\d+)?\s+@@", line)
+            if hunk_header_match:
+                cleaned_lines.append(line)
+            else:
+                # Malformed @@ header, will recompute when flushing
+                cleaned_lines.append("@@")
+        elif in_hunk:
+            if not line:
+                current_hunk_lines.append(" ")
+            elif line[0] in (" ", "+", "-"):
+                current_hunk_lines.append(line)
+            elif line.startswith("\\ No newline at end of file"):
+                current_hunk_lines.append(line)
+            else:
+                # LLM forgot leading space for context line
+                current_hunk_lines.append(" " + line)
+        else:
+            cleaned_lines.append(line)
+
+    flush_hunk()
+
+    # Re-verify and fix hunk headers with actual line counts if needed
+    final_lines = []
+    i = 0
+    while i < len(cleaned_lines):
+        line = cleaned_lines[i]
+        if line.startswith("@@"):
+            # Gather lines in this hunk
+            hunk_body = []
+            j = i + 1
+            while j < len(cleaned_lines) and not cleaned_lines[j].startswith("@@") and not cleaned_lines[j].startswith("--- "):
+                hunk_body.append(cleaned_lines[j])
+                j += 1
+
+            old_count = sum(1 for l in hunk_body if l.startswith(" ") or l.startswith("-"))
+            new_count = sum(1 for l in hunk_body if l.startswith(" ") or l.startswith("+"))
+
+            # If the original line already has explicit count numbers, keep it unless count is omitted
+            m_full = re.match(r"^@@\s+-(\d+),(\d+)\s+\+(\d+),(\d+)\s+@@(.*)$", line)
+            m_partial = re.match(r"^@@\s+-(\d+)(?:,(\d+))?\s+\+(\d+)(?:,(\d+))?\s+@@(.*)$", line)
+            if m_full:
+                final_lines.append(line)
+            elif m_partial:
+                orig_s = m_partial.group(1)
+                new_s = m_partial.group(3)
+                suffix = m_partial.group(5)
+                final_lines.append(f"@@ -{orig_s},{old_count} +{new_s},{new_count} @@{suffix}")
+            else:
+                final_lines.append(f"@@ -1,{old_count} +1,{new_count} @@")
+            final_lines.extend(hunk_body)
+            i = j
+        else:
+            final_lines.append(line)
+            i += 1
+
+    return "\n".join(final_lines) + "\n"
 
 
 def _try_git_apply(cwd: Path, patch_path: Path, check_only: bool = False) -> tuple[bool, str]:
@@ -171,6 +268,8 @@ def _try_python_diff_apply(repo_root: Path, diff: str, check_only: bool = False)
 
 def validate_patch(repo_root: str | Path, diff: str) -> ValidationResult:
     """Check if *diff* applies cleanly to *repo_root*."""
+    if not diff or not diff.strip():
+        return ValidationResult(patch_diff="", applies_cleanly=False, error="Diff is empty")
     repo_root = Path(repo_root).resolve()
     tmp_dir = Path(tempfile.mkdtemp(prefix="graph_agent_patch_"))
     normalized_diff = _normalize_diff(diff)

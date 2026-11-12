@@ -104,27 +104,18 @@ def run_tests_in_isolation(
 
         patch_applied = False
         if patch_diff:
-            patch_file = tmp_repo / "_fix.patch"
-            patch_file.write_text(patch_diff, encoding="utf-8")
-            apply_proc = subprocess.run(
-                ["git", "apply", "--ignore-whitespace", "_fix.patch"],
-                cwd=str(tmp_repo),
-                capture_output=True,
-                text=True,
-                timeout=30,
-            )
-            patch_file.unlink(missing_ok=True)
-            if apply_proc.returncode != 0:
-                err = (apply_proc.stderr or apply_proc.stdout).strip()
-                log.warning("Patch failed to apply in isolation: %s", err)
+            from graph_agent.patch.validator import apply_patch
+            applied, apply_err = apply_patch(tmp_repo, patch_diff)
+            if not applied:
+                log.warning("Patch failed to apply in isolation: %s", apply_err)
                 return VerificationResult(
                     success=False,
                     patch_applied=False,
                     tests_passed=0,
                     tests_failed=0,
-                    test_output=err,
-                    exit_code=apply_proc.returncode,
-                    error=f"Patch apply failed: {err}",
+                    test_output=apply_err,
+                    exit_code=1,
+                    error=f"Patch apply failed: {apply_err}",
                 )
             patch_applied = True
 

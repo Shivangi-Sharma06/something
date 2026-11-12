@@ -31,14 +31,20 @@ Produce the minimal unified diff inside a ```diff code block ready to apply:
 ```diff
 --- a/<filepath>
 +++ b/<filepath>
-@@ ... @@
-...
+@@ -<orig_start>,<orig_count> +<new_start>,<new_count> @@
+ unchanged context line
+-removed line
++added line
+ unchanged context line
 ```
 
 Strict Diff Rules:
-- Header: --- a/<filepath> and +++ b/<filepath>
-- Context lines must match the provided repository code.
-- Provide real, complete code without placeholders.
+- Header: exactly `--- a/<filepath>` and `+++ b/<filepath>` matching the relative repository path.
+- In each hunk, every unchanged context line MUST begin with a single space character `' '`.
+- Deleted lines MUST begin with `'-'`.
+- Added lines MUST begin with `'+'`.
+- NEVER output raw Python code without a leading space or +/- indicator inside the diff block.
+- Provide real, complete code without placeholders or ellipsis comments.
 """
 
 
