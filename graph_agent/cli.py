@@ -77,7 +77,7 @@ def index_cmd(repo_path: str, name: str | None, db_url: str | None) -> None:
     if result.errors:
         console.print("[yellow]Errors:[/yellow]")
         for err in result.errors:
-            console.print(f"  • {err}")
+            console.print(f"  * {err}")
 
     console.print(f"[green]Done.[/green] Repo id={result.repo_id}")
 
@@ -337,7 +337,7 @@ def repair_cmd(repo_path: str, description: str, stack_trace: str,
     console.print(patch.root_cause.strip())
 
     val = validate_patch(repo_path, patch.diff)
-    status = "[green]✓ Applies cleanly[/green]" if val.applies_cleanly else f"[red]✗ {val.error}[/red]"
+    status = "[green][OK] Applies cleanly[/green]" if val.applies_cleanly else f"[red][ERROR] {val.error}[/red]"
     console.print(f"\n[bold]Patch validation:[/bold] {status}")
 
     if output_diff:
@@ -348,7 +348,7 @@ def repair_cmd(repo_path: str, description: str, stack_trace: str,
         console.print(patch.diff)
 
     console.print(
-        "\n[yellow]⚠ Patch NOT applied.[/yellow] "
+        "\n[yellow][WARN] Patch NOT applied.[/yellow] "
         "Review the diff above and apply manually with:\n"
         f"  git apply <diff_file>"
     )

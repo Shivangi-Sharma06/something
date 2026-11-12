@@ -54,7 +54,11 @@ def list_ollama_models(host_url: str | None = None, timeout: float = 2.0) -> lis
         req = urllib.request.Request(tags_url, headers={"User-Agent": "graph-agent"})
         with urllib.request.urlopen(req, timeout=timeout) as resp:
             data = json.loads(resp.read().decode("utf-8"))
-            models = [m.get("name") or m.get("model") for m in data.get("models", []) if (m.get("name") or m.get("model"))]
+            models = [
+                m.get("name") or m.get("model")
+                for m in data.get("models", [])
+                if (m.get("name") or m.get("model"))
+            ]
             return models
     except Exception as exc:
         log.debug("Could not query Ollama models at %s: %s", tags_url, exc)
@@ -67,15 +71,23 @@ def select_ollama_model(
     interactive: bool = True,
 ) -> str:
     """Renders a terminal dropdown to choose among local Ollama models on the machine.
-    
+
     If gptoss:20b is configured, it is featured as default choice.
     """
-    configured_model = (
+    # Normalize aliases: treat gpt-oss:20b and gpt_oss:20b as gptoss:20b
+    def _normalize(name: str) -> str:
+        clean = name.strip()
+        if clean in ("gpt-oss:20b", "gpt_oss:20b", "gpt-oss", "gptoss"):
+            return "gptoss:20b"
+        return clean
+
+    configured_model = _normalize(
         os.environ.get("OLLAMA_MODEL")
         or os.environ.get("OPENAI_MODEL")
         or default_model
     )
-    installed_models = list_ollama_models(host_url)
+    raw_installed = list_ollama_models(host_url)
+    installed_models = [_normalize(m) for m in raw_installed]
 
     # Build unique ordered choices
     choices: list[str] = []
@@ -83,26 +95,32 @@ def select_ollama_model(
         choices.append(configured_model)
     choices.extend(installed_models)
 
-    # Ensure gptoss:20b is always an available option
+    # Base standard models
     if "gptoss:20b" not in choices:
         choices.append("gptoss:20b")
+    if "llama3:8b" not in choices:
+        choices.append("llama3:8b")
 
     # Dedup while preserving order
     seen = set()
     unique_choices = []
     for c in choices:
-        if c and c not in seen:
-            seen.add(c)
-            unique_choices.append(c)
+        norm = _normalize(c)
+        if norm and norm not in seen:
+            seen.add(norm)
+            unique_choices.append(norm)
 
-    custom_option = "➕ [Enter custom model name]"
+    custom_option = "[Enter custom model name]"
     menu_choices = unique_choices + [custom_option]
 
     # Non-interactive or piped input: return configured model
     if not interactive or not sys.stdin.isatty():
         return configured_model
 
+    selected: str = configured_model
+
     # Interactive dropdown using questionary (with arrow-key navigation)
+    selected_by_dropdown = False
     try:
         import questionary
         console.print("[bold cyan]Select local Ollama model to use:[/bold cyan]")
@@ -110,43 +128,49 @@ def select_ollama_model(
             "Local Ollama Model:",
             choices=menu_choices,
             default=configured_model if configured_model in unique_choices else unique_choices[0],
-            instruction="(Use arrow keys ↑/↓, Enter to confirm)",
+            instruction="(Use arrow keys Up/Down, Enter to confirm)",
         ).ask()
 
-        if choice is None:  # User pressed Ctrl+C or Esc
-            return configured_model
-
-        if choice == custom_option:
-            typed = questionary.text("Enter model name (e.g. gptoss:20b, llama3):").ask()
-            return typed.strip() if typed and typed.strip() else configured_model
-
-        return choice
+        if choice is not None:
+            if choice == custom_option:
+                typed = questionary.text("Enter model name (e.g. gptoss:20b, llama3):").ask()
+                selected = typed.strip() if typed and typed.strip() else configured_model
+            else:
+                selected = choice
+            selected_by_dropdown = True
     except Exception as exc:
         log.debug("questionary selection failed, falling back to rich prompt: %s", exc)
 
-    # Fallback to rich numbered prompt if questionary is unavailable or fails
-    console.print("\n[bold cyan]Available Local Ollama Models:[/bold cyan]")
-    for i, m in enumerate(unique_choices, 1):
-        def_tag = " [green](default)[/green]" if m == configured_model else ""
-        console.print(f"  {i}) [bold]{m}[/bold]{def_tag}")
-    console.print(f"  {len(unique_choices) + 1}) Custom model name")
+    if not selected_by_dropdown:
+        # Fallback to rich numbered prompt if questionary is unavailable or fails
+        console.print("\n[bold cyan]Available Local Ollama Models:[/bold cyan]")
+        for i, m in enumerate(unique_choices, 1):
+            def_tag = " [green](default)[/green]" if m == configured_model else ""
+            console.print(f"  {i}) [bold]{m}[/bold]{def_tag}")
+        console.print(f"  {len(unique_choices) + 1}) Custom model name")
 
-    val = Prompt.ask(
-        "Enter choice number or model name",
-        default="1",
-    ).strip()
+        val = Prompt.ask(
+            "Enter choice number or model name",
+            default="1",
+        ).strip()
 
-    if val.isdigit() and 1 <= int(val) <= len(unique_choices):
-        return unique_choices[int(val) - 1]
-    elif val.isdigit() and int(val) == len(unique_choices) + 1:
-        custom = Prompt.ask("Enter model name").strip()
-        return custom if custom else configured_model
-    elif val in unique_choices:
-        return val
-    elif val:
-        return val
+        if val.isdigit() and 1 <= int(val) <= len(unique_choices):
+            selected = unique_choices[int(val) - 1]
+        elif val.isdigit() and int(val) == len(unique_choices) + 1:
+            custom = Prompt.ask("Enter model name").strip()
+            selected = custom if custom else configured_model
+        elif val in unique_choices:
+            selected = val
+        elif val:
+            selected = val
 
-    return configured_model
+    # Verify if selected model is present in Ollama
+    if installed_models and selected not in installed_models:
+        console.print(f"[yellow][WARN] Model '{selected}' is not currently downloaded in Ollama.[/yellow]")
+        console.print(f"[dim]Check installed models:  ollama list[/dim]")
+        console.print(f"[dim]Install model:          ollama pull {selected}[/dim]\n")
+
+    return selected
 
 
 class OllamaAdapter(OpenAICompatibleAdapter):
@@ -197,12 +221,12 @@ class OllamaAdapter(OpenAICompatibleAdapter):
             err_msg = str(exc)
             if "Connection refused" in err_msg or "Failed to connect" in err_msg or "ConnectError" in err_msg:
                 raise RuntimeError(
-                    f"Ollama server is not running at {self._base_url}. "
+                    f"[ERROR] Ollama server is not running at {self._base_url}. "
                     "Please start Ollama with 'ollama serve' or check 'systemctl status ollama'."
                 ) from exc
             if "not found" in err_msg.lower() or "404" in err_msg:
                 raise RuntimeError(
-                    f"Model '{self._model}' was not found in Ollama. "
+                    f"[ERROR] Model '{self._model}' was not found in Ollama. "
                     f"Run: ollama pull {self._model} (or ollama create {self._model})"
                 ) from exc
             raise
@@ -214,12 +238,12 @@ class OllamaAdapter(OpenAICompatibleAdapter):
             err_msg = str(exc)
             if "Connection refused" in err_msg or "Failed to connect" in err_msg or "ConnectError" in err_msg:
                 raise RuntimeError(
-                    f"Ollama server is not running at {self._base_url}. "
+                    f"[ERROR] Ollama server is not running at {self._base_url}. "
                     "Please start Ollama with 'ollama serve' or check 'systemctl status ollama'."
                 ) from exc
             if "not found" in err_msg.lower() or "404" in err_msg:
                 raise RuntimeError(
-                    f"Model '{self._model}' was not found in Ollama. "
+                    f"[ERROR] Model '{self._model}' was not found in Ollama. "
                     f"Run: ollama pull {self._model} (or ollama create {self._model})"
                 ) from exc
             raise

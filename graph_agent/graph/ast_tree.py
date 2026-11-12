@@ -64,7 +64,7 @@ class PermanentASTTree:
 
         for file_node in self.files:
             lang_label = f" ({file_node.language})" if file_node.language else ""
-            file_tree = root.add(f"[bold blue]📁 {file_node.rel_path}[/bold blue]{lang_label}")
+            file_tree = root.add(f"[bold blue][file] {file_node.rel_path}[/bold blue]{lang_label}")
 
             if not file_node.symbols:
                 file_tree.add("[dim italic](no indexed top-level symbols)[/dim italic]")
@@ -79,9 +79,9 @@ class PermanentASTTree:
 def _add_symbol_to_tree(parent_tree: Tree, sym: ASTSymbolNode) -> None:
     lines = f"L{sym.line_start}-L{sym.line_end}" if sym.line_start else ""
     kind_style = "magenta" if sym.kind == "class" else "yellow" if sym.kind in ("function", "method") else "cyan"
-    icon = "🏛 " if sym.kind == "class" else "⚡ " if sym.kind in ("function", "method") else "🔹 "
+    tag = f"[{sym.kind}]"
     
-    label = f"{icon}[{kind_style}]{sym.kind}[/{kind_style}] [bold]{sym.name}[/bold]"
+    label = f"[{kind_style}]{tag}[/{kind_style}] [bold]{sym.name}[/bold]"
     if sym.signature:
         sig = sym.signature.split("\n")[0].strip()
         if len(sig) > 60:
@@ -96,13 +96,13 @@ def _add_symbol_to_tree(parent_tree: Tree, sym: ASTSymbolNode) -> None:
         callers_str = ", ".join(sym.callers[:3])
         if len(sym.callers) > 3:
             callers_str += f" (+{len(sym.callers) - 3} more)"
-        node.add(f"[dim]⇦ Called by: {callers_str}[/dim]")
+        node.add(f"[dim]<- Called by: {callers_str}[/dim]")
 
     if sym.callees:
         callees_str = ", ".join(sym.callees[:3])
         if len(sym.callees) > 3:
             callees_str += f" (+{len(sym.callees) - 3} more)"
-        node.add(f"[dim]⇨ Calls: {callees_str}[/dim]")
+        node.add(f"[dim]-> Calls: {callees_str}[/dim]")
 
     for child in sym.children:
         _add_symbol_to_tree(node, child)

@@ -1,16 +1,16 @@
 """Interactive Chat and Decision Graph module for Graph-Based Coding Agent.
 
 Workflow:
-1. One-time permanent AST repository graph construction & persistence in PostgreSQL.
-2. User provides prompt/task in an interactive chat session (or types /tree, /ast to view permanent AST).
-3. System builds a Temporary Decision Tree:
-   - Reasons why specific files & symbols are considered
+1. One-time permanent AST repository graph construction and persistence in PostgreSQL.
+2. User provides prompt/task in an interactive chat session (or types /tree, /ast, /model).
+3. System builds and displays a Temporary Decision Tree:
+   - Reasons why specific files and symbols are considered
    - Shows caller/callee links, confidence scores, and line ranges targeted
-4. Real-time prompt & repository context rendering.
-5. Real-time streaming response from the LLM.
-6. For questions/inquiries: delivers full architectural answer.
-   For bug fixes/refactors: provides step-by-step reasoning + unified diff, pre-validates cleanly,
-   and upon user confirmation (y/yes), applies patch directly to the repository.
+4. Real-time prompt and repository context preview.
+5. Real-time streaming response from the LLM with thinking and approach rationale.
+6. For questions/inquiries: delivers architectural explanation.
+   For bug fixes/refactors: proposes unified diff, allows running tests in isolation,
+   and merges code into the repository upon user confirmation.
 """
 
 from __future__ import annotations
@@ -26,8 +26,6 @@ from rich.panel import Panel
 from rich.tree import Tree
 from rich.prompt import Prompt
 from rich.syntax import Syntax
-from rich.live import Live
-from rich.text import Text
 
 from graph_agent.db.connection import get_session
 from graph_agent.db.models import Repository
@@ -39,6 +37,7 @@ from graph_agent.llm.base import ModelAdapter
 from graph_agent.llm.openai_compat import get_adapter
 from graph_agent.patch.generator import generate_patch, generate_answer, extract_patch
 from graph_agent.patch.validator import validate_patch, apply_patch
+from graph_agent.verifier.runner import run_tests_in_isolation
 from graph_agent.llm.ollama import select_ollama_model
 from graph_agent.settings import get_settings
 
@@ -48,7 +47,7 @@ log = logging.getLogger(__name__)
 
 def ensure_permanent_graph(repo_path: str | Path, name: str | None = None) -> tuple[int, PermanentASTTree]:
     """Ensures the repository is parsed with Tree-sitter and stored in PostgreSQL.
-    
+
     If not already indexed, parses all files, stores AST symbols, and resolves edges.
     Returns (repo_id, ast_tree).
     """
@@ -59,13 +58,13 @@ def ensure_permanent_graph(repo_path: str | Path, name: str | None = None) -> tu
             console.print(f"[cyan]Indexing repository at {repo_root} (Tree-sitter AST)...[/cyan]")
             result = index_repository(session, repo_root, repo_name=name or Path(repo_root).name)
             repo = session.query(Repository).filter_by(root_path=repo_root).first()
-            console.print(f"[green]✓ Indexed {result.files_indexed} files, {result.symbols_upserted} symbols in PostgreSQL.[/green]")
-        
+            console.print(f"[green][OK] Indexed {result.files_indexed} files, {result.symbols_upserted} symbols in PostgreSQL.[/green]")
+
         # Ensure graph edges are built
         console.print("[cyan]Building/updating permanent code graph edges...[/cyan]")
         g_result = build_graph(session, repo.id)
         console.print(
-            f"[green]✓ Code graph ready: {g_result.contains_edges} CONTAINS edges, "
+            f"[green][OK] Code graph ready: {g_result.contains_edges} CONTAINS edges, "
             f"{g_result.edges_resolved} CALLS resolved.[/green]"
         )
 
@@ -79,9 +78,9 @@ def display_prompt_and_context(prompt: str, dt: TemporaryDecisionTree, context: 
     if hasattr(context, "slices") and context.slices:
         for slc in context.slices:
             kind_lbl = "full source" if slc.is_full else "signature"
-            slices_desc.append(f"• [cyan]{slc.rel_path}[/cyan] ({slc.qualified_name}, L{slc.line_start}-L{slc.line_end}) [{kind_lbl}]")
+            slices_desc.append(f"* [cyan]{slc.rel_path}[/cyan] ({slc.qualified_name}, L{slc.line_start}-L{slc.line_end}) [{kind_lbl}]")
     else:
-        slices_desc.append("• [dim]Repository structural summary / symbol scope[/dim]")
+        slices_desc.append("* [dim]Repository structural summary / symbol scope[/dim]")
 
     context_text = "\n".join(slices_desc)
     panel_content = (
@@ -89,7 +88,7 @@ def display_prompt_and_context(prompt: str, dt: TemporaryDecisionTree, context: 
         f"[bold green]Repository Context Injected ({dt.tokens_used} est. tokens):[/bold green]\n"
         f"{context_text}"
     )
-    console.print(Panel(panel_content, title="[bold]Real-Time Prompt & Context Preview[/bold]", border_style="blue"))
+    console.print(Panel(panel_content, title="[bold]Real-Time Prompt and Context Preview[/bold]", border_style="blue"))
 
 
 def run_chat_session(
@@ -119,10 +118,10 @@ def run_chat_session(
         f"Repository: [cyan]{repo_path}[/cyan]\n"
         f"Model: [bold yellow]{model_name}[/bold yellow] via [cyan]{effective_adapter}[/cyan]\n"
         f"Commands:\n"
-        f"  • Type your prompt/request.\n"
-        f"  • Type [bold yellow]/model[/bold yellow] to switch local Ollama model.\n"
-        f"  • Type [bold yellow]/tree[/bold yellow] to view permanent AST tree.\n"
-        f"  • Type [bold yellow]exit[/bold yellow] to quit.",
+        f"  * Type your prompt or request.\n"
+        f"  * Type [bold yellow]/model[/bold yellow] to switch local Ollama model.\n"
+        f"  * Type [bold yellow]/tree[/bold yellow] to view permanent AST tree.\n"
+        f"  * Type [bold yellow]exit[/bold yellow] to quit.",
         border_style="green",
     ))
 
@@ -165,7 +164,7 @@ def run_chat_session(
                     base_url=api_base,
                     api_key=api_key,
                 )
-                console.print(f"[bold green]✓ Active model switched to:[/bold green] [bold cyan]{model_name}[/bold cyan] ({llm.name()})\n")
+                console.print(f"[bold green][OK] Active model switched to:[/bold green] [bold cyan]{model_name}[/bold cyan] ({llm.name()})\n")
             continue
 
         # User wants to inspect permanent AST tree
@@ -175,7 +174,7 @@ def run_chat_session(
                 console.print(tree.to_rich_tree())
             continue
 
-        console.print("\n[cyan]Analyzing request & querying structural code graph...[/cyan]")
+        console.print("\n[cyan]Analyzing request and querying structural code graph...[/cyan]")
 
         with get_session() as session:
             # Phase 2: Build Temporary Decision Tree
@@ -191,7 +190,7 @@ def run_chat_session(
 
         # Phase 4: Stream response in real time
         console.print("\n[bold cyan]LLM Response (Streaming in real time):[/bold cyan]")
-        console.print("─" * 60)
+        console.print("-" * 60)
 
         chunks: list[str] = []
 
@@ -222,13 +221,21 @@ def run_chat_session(
                 )
                 patch = extract_patch(full_text)
         except Exception as exc:
-            console.print(f"\n[red]Error generating response: {exc}[/red]")
+            console.print(f"\n[red][ERROR] Error generating response: {exc}[/red]")
             continue
 
-        console.print("\n" + "─" * 60)
+        console.print("\n" + "-" * 60)
 
-        # Phase 5: If a code patch was generated, validate and offer application
+        # Phase 5: Patch evaluation, testing, and merge workflow
         if patch and patch.is_valid and patch.diff.strip():
+            # Display LLM Thinking & Approach Rationale
+            if patch.root_cause and patch.root_cause.strip():
+                console.print(Panel(
+                    patch.root_cause.strip(),
+                    title="[bold green]Thinking and Approach Rationale[/bold green]",
+                    border_style="green",
+                ))
+
             # Display formatted patch diff
             syntax = Syntax(patch.diff, "diff", theme="monokai", line_numbers=True)
             console.print(Panel(syntax, title="[bold cyan]Proposed Patch Diff[/bold cyan]", border_style="cyan"))
@@ -236,26 +243,49 @@ def run_chat_session(
             # Pre-validate patch
             val = validate_patch(repo_path, patch.diff)
             if val.applies_cleanly:
-                console.print("[bold green]✓ Pre-validation check: Patch applies cleanly to the repository.[/bold green]")
+                console.print("[bold green][OK] Pre-validation check: Patch applies cleanly to the repository.[/bold green]")
             else:
-                console.print(f"[bold yellow]⚠ Pre-validation note: {val.error}[/bold yellow]")
+                console.print(f"[bold yellow][WARN] Pre-validation note: {val.error}[/bold yellow]")
 
-            # Ask user confirmation
-            user_choice = Prompt.ask(
-                "\n[bold yellow]Apply this patch to your repository? (y/yes to apply, n/no to discard)[/bold yellow]",
-                default="n",
-            ).strip().lower()
+            # Interactive action loop: Test, Merge/Apply, View, Discard
+            while True:
+                console.print(
+                    "\n[bold yellow]Options:[/bold yellow]\n"
+                    "  [bold]t[/bold]) Run test suite in isolation with this patch\n"
+                    "  [bold]m[/bold]) Merge and apply patch to repository code\n"
+                    "  [bold]v[/bold]) View diff again\n"
+                    "  [bold]d[/bold]) Discard patch"
+                )
+                action = Prompt.ask("[bold yellow]Choose action (t/m/v/d)[/bold yellow]", default="m").strip().lower()
 
-            if user_choice in ("y", "yes", "true", "1"):
-                applied, msg = apply_patch(repo_path, patch.diff)
-                if applied:
-                    console.print(f"[bold green]✔ Patch applied successfully to {repo_path}![/bold green]")
-                    console.print("[dim]Updating permanent AST graph in PostgreSQL...[/dim]")
-                    with get_session() as session:
-                        index_repository(session, str(repo_path))
-                        build_graph(session, repo_id)
-                    console.print("[green]✓ Permanent AST graph synchronized.[/green]")
+                if action in ("t", "test", "tests"):
+                    console.print("[cyan]Running test suite in isolation with patch applied...[/cyan]")
+                    res = run_tests_in_isolation(repo_path, patch_diff=patch.diff)
+                    if res.success:
+                        console.print(f"[bold green][PASS] Isolated test run succeeded ({res.tests_passed} passed, {res.tests_failed} failed).[/bold green]")
+                    else:
+                        console.print(f"[bold red][FAIL] Isolated test run failed ({res.tests_passed} passed, {res.tests_failed} failed).[/bold red]")
+                        if res.error:
+                            console.print(f"[red]{res.error}[/red]")
+                        if res.test_output:
+                            console.print(f"[dim]{res.test_output[:1200]}[/dim]")
+                elif action in ("m", "merge", "apply", "y", "yes"):
+                    applied, msg = apply_patch(repo_path, patch.diff)
+                    if applied:
+                        console.print(f"[bold green][OK] Patch successfully applied and merged into {repo_path}[/bold green]")
+                        console.print("[dim]Updating permanent AST graph in PostgreSQL...[/dim]")
+                        with get_session() as session:
+                            index_repository(session, str(repo_path))
+                            build_graph(session, repo_id)
+                        console.print("[green][OK] Permanent AST graph synchronized.[/green]")
+                    else:
+                        console.print(f"[red][ERROR] Failed to apply patch: {msg}[/red]")
+                    break
+                elif action in ("v", "view", "diff"):
+                    syntax = Syntax(patch.diff, "diff", theme="monokai", line_numbers=True)
+                    console.print(Panel(syntax, title="[bold cyan]Proposed Patch Diff[/bold cyan]", border_style="cyan"))
+                elif action in ("d", "discard", "n", "no"):
+                    console.print("[yellow][INFO] Patch discarded. Repository was not modified.[/yellow]")
+                    break
                 else:
-                    console.print(f"[red]Failed to apply patch: {msg}[/red]")
-            else:
-                console.print("[yellow]Patch discarded. Repository was not modified.[/yellow]")
+                    console.print("[yellow]Invalid option. Please choose t, m, v, or d.[/yellow]")

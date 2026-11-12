@@ -65,10 +65,10 @@ class TemporaryDecisionTree:
             f"[dim](Intent: [cyan]{self.intent}[/cyan] | Targets: {len(self.symbol_nodes)} symbols in {len(self.target_files)} files)[/dim]"
         )
 
-        intent_node = root.add(f"[bold yellow]🎯 Objective:[/bold yellow] [italic]{self.prompt}[/italic]")
+        intent_node = root.add(f"[bold yellow]Objective:[/bold yellow] [italic]{self.prompt}[/italic]")
 
         # Files & Symbols branch
-        files_branch = root.add(f"[bold blue]📁 Repository Targets ({len(self.target_files)} file(s))[/bold blue]")
+        files_branch = root.add(f"[bold blue]Repository Targets ({len(self.target_files)} file(s))[/bold blue]")
         for fpath in sorted(self.target_files):
             file_tree = files_branch.add(f"[bold cyan]{fpath}[/bold cyan]")
             file_syms = [s for s in self.symbol_nodes if s.rel_path == fpath]
@@ -81,13 +81,13 @@ class TemporaryDecisionTree:
                 )
                 sym_tree.add(f"[dim]Rationale: {s.reason}[/dim]")
                 if s.callers:
-                    sym_tree.add(f"[dim]⇦ Callers: {', '.join(s.callers[:3])}[/dim]")
+                    sym_tree.add(f"[dim]<- Callers: {', '.join(s.callers[:3])}[/dim]")
                 if s.callees:
-                    sym_tree.add(f"[dim]⇨ Callees: {', '.join(s.callees[:3])}[/dim]")
+                    sym_tree.add(f"[dim]-> Callees: {', '.join(s.callees[:3])}[/dim]")
 
         # Context Budget branch
         ctx_branch = root.add(
-            f"[bold green]🧠 Context Budget Decision[/bold green]: "
+            f"[bold green]Context Budget Decision[/bold green]: "
             f"{self.tokens_used}/{self.token_budget} tokens allocated across {self.context_slices_count} slice(s)"
         )
 
@@ -97,7 +97,7 @@ class TemporaryDecisionTree:
             if self.intent in ("repair", "refactor")
             else "Provide detailed answer with code references and structural analysis"
         )
-        root.add(f"[bold yellow]⚡ Action Plan:[/bold yellow] {action_desc}")
+        root.add(f"[bold yellow]Action Plan:[/bold yellow] {action_desc}")
 
         return root
 

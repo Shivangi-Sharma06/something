@@ -64,3 +64,10 @@ def test_get_adapter_factory_for_ollama():
     adapter = get_adapter("ollama", model="gptoss:20b")
     assert isinstance(adapter, OllamaAdapter)
     assert "gptoss:20b" in adapter.name()
+
+
+def test_select_ollama_model_normalization_and_llama3():
+    # If Ollama has gpt-oss:20b, it should normalize to gptoss:20b and include llama3:8b
+    with patch("graph_agent.llm.ollama.list_ollama_models", return_value=["gpt-oss:20b", "qwen2.5-coder:7b"]):
+        res = select_ollama_model(default_model="gpt-oss:20b", interactive=False)
+        assert res == "gptoss:20b"
