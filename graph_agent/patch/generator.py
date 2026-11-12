@@ -13,23 +13,32 @@ from graph_agent.llm.base import ModelAdapter
 log = logging.getLogger(__name__)
 
 SYSTEM_PROMPT = """\
-You are an expert software engineer performing automated code modifications and bug repair.
-Given the user prompt and relevant source code context, your output MUST follow this exact structure:
+You are an autonomous software engineering agent tasked with modifying code in a repository.
+IMPORTANT: Never tell the user how to make the change themselves. Do NOT write "You can change this by..." or "Here is how you can do it".
+Instead, YOU must make the decisions, determine the exact code changes needed, and produce the complete unified patch so the agent can apply it directly to the repository files upon user approval.
 
-### Summary of Changes & Reasoning
-Provide a concise 2 to 4 sentence explanation:
-- What change you are making.
-- Why this change solves the user prompt based on the code context.
+Your response MUST follow this exact structure:
+
+### Decisions and Considered Factors
+- What target files, functions, and call dependencies were considered.
+- Why this approach was selected based on the code context.
+
+### Changes Made
+- Concise, concrete bullet points detailing all modifications, additions, or removals.
 
 ### Unified Patch
-Produce a minimal unified diff inside a ```diff code block.
+Produce the minimal unified diff inside a ```diff code block ready to apply:
+```diff
+--- a/<filepath>
++++ b/<filepath>
+@@ ... @@
+...
+```
 
 Strict Diff Rules:
-- Header:
-  --- a/<filepath>
-  +++ b/<filepath>
-- Context lines must exactly match the source code provided in the prompt.
-- Do NOT output stream-of-consciousness thought traces. Keep the summary clear, professional, and brief.
+- Header: --- a/<filepath> and +++ b/<filepath>
+- Context lines must match the provided repository code.
+- Provide real, complete code without placeholders.
 """
 
 
@@ -59,9 +68,13 @@ def _format_candidates(candidates: list[ScoredSymbol]) -> str:
 from typing import Callable, Optional
 
 SYSTEM_QA_PROMPT = """\
-You are an expert software engineer assistant analyzing a software repository.
+You are an expert software engineering agent analyzing a software repository.
 Answer the user's question accurately using the provided code context and decision tree reasoning.
-Provide clear explanations, exact code references, file names, line numbers, and architectural context.
+If the user asks for any code modification or implementation:
+- Do NOT advise the user how they can do it.
+- State your Decisions and Considered Factors.
+- State the Changes Made.
+- Provide the complete unified diff inside ```diff ... ``` so it can be applied directly to the codebase with user confirmation.
 """
 
 
@@ -100,13 +113,13 @@ def build_repair_prompt(
 {code_ctx}
 
 ## Instructions
-1. Provide a clear "Reasoning:" paragraph explaining:
-   - Why this change is needed.
-   - What logic is modified or added.
-2. Provide a unified diff inside ```diff ... ```:
-   - Header: `--- a/<filepath>` and `+++ b/<filepath>`
-   - Use the EXACT code from the Code Context above for unchanged context lines.
-   - Do NOT invent or assume different class structures.
+1. State your Decisions and Considered Factors:
+   - What target files, functions, and architecture factors were evaluated.
+2. State the Changes Made:
+   - Specific list of code modifications implemented.
+3. Provide the Unified Patch:
+   - Output the exact unified diff inside a ```diff code block ready for application.
+   - Do NOT give advisory steps telling the user how to do it; provide the actual code diff.
 """
     return [
         {"role": "system", "content": SYSTEM_PROMPT},

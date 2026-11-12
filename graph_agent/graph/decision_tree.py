@@ -122,7 +122,10 @@ def classify_prompt_intent(prompt: str) -> str:
     p = prompt.lower()
     if any(k in p for k in ("fix", "bug", "error", "fail", "exception", "traceback", "patch", "repair", "issue")):
         return "repair"
-    elif any(k in p for k in ("refactor", "rename", "add function", "add method", "implement", "update code", "modify")):
+    elif any(k in p for k in (
+        "refactor", "rename", "add", "implement", "update", "modify",
+        "change", "write", "create", "delete", "remove", "edit", "replace", "make"
+    )):
         return "refactor"
     else:
         return "qa_explanation"
