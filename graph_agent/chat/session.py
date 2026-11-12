@@ -247,28 +247,89 @@ def run_chat_session(
             else:
                 console.print(f"[bold yellow][WARN] Pre-validation note: {val.error}[/bold yellow]")
 
-            # Interactive action loop: Test, Merge/Apply, View, Discard
+            # Interactive action loop: Test, Fix/Retry, Merge/Apply, View, Discard
+            last_error_context = ""
             while True:
                 console.print(
                     "\n[bold yellow]Options:[/bold yellow]\n"
                     "  [bold]t[/bold]) Run test suite in isolation with this patch\n"
+                    "  [bold]f[/bold]) Ask LLM to fix patch again using error feedback\n"
                     "  [bold]m[/bold]) Merge and apply patch to repository code\n"
                     "  [bold]v[/bold]) View diff again\n"
                     "  [bold]d[/bold]) Discard patch"
                 )
-                action = Prompt.ask("[bold yellow]Choose action (t/m/v/d)[/bold yellow]", default="m").strip().lower()
+                action = Prompt.ask("[bold yellow]Choose action (t/f/m/v/d)[/bold yellow]", default="m").strip().lower()
 
                 if action in ("t", "test", "tests"):
                     console.print("[cyan]Running test suite in isolation with patch applied...[/cyan]")
                     res = run_tests_in_isolation(repo_path, patch_diff=patch.diff)
                     if res.success:
                         console.print(f"[bold green][PASS] Isolated test run succeeded ({res.tests_passed} passed, {res.tests_failed} failed).[/bold green]")
+                        last_error_context = ""
                     else:
                         console.print(f"[bold red][FAIL] Isolated test run failed ({res.tests_passed} passed, {res.tests_failed} failed).[/bold red]")
+                        err_parts = []
                         if res.error:
                             console.print(f"[red]{res.error}[/red]")
+                            err_parts.append(res.error)
                         if res.test_output:
                             console.print(f"[dim]{res.test_output[:1200]}[/dim]")
+                            err_parts.append(res.test_output[:2000])
+                        last_error_context = "\n".join(err_parts)
+                        console.print("[bold yellow][TIP] Type 'f' to ask the LLM to fix this patch automatically based on the failure above.[/bold yellow]")
+
+                elif action in ("f", "fix", "retry"):
+                    feedback = last_error_context
+                    if not feedback:
+                        val = validate_patch(repo_path, patch.diff)
+                        if not val.applies_cleanly and val.error:
+                            feedback = f"Patch apply validation failed: {val.error}"
+                        else:
+                            feedback = Prompt.ask("[yellow]Enter specific error details or instructions for fixing the patch (leave blank for general retry)[/yellow]", default="").strip()
+
+                    fix_prompt = (
+                        f"The previously proposed patch failed with the following error:\n"
+                        f"{feedback if feedback else 'Patch failed to apply or failed tests.'}\n\n"
+                        f"Original user request:\n{user_prompt}\n\n"
+                        f"Please regenerate a valid, clean unified diff that resolves this error completely."
+                    )
+
+                    console.print(f"\n[bold cyan]Requesting patch correction from {model_name} (Streaming)...[/bold cyan]")
+                    console.print("-" * 60)
+                    chunks = []
+                    try:
+                        new_patch = generate_patch(
+                            adapter=llm,
+                            description=fix_prompt,
+                            stack_trace=feedback,
+                            candidates=candidates,
+                            context=context,
+                            decision_tree_reasoning=decision_tree.to_prompt_context(),
+                            stream_chunk_cb=_stream_cb,
+                        )
+                        console.print("\n" + "-" * 60)
+                        if new_patch and new_patch.is_valid and new_patch.diff.strip():
+                            patch = new_patch
+                            last_error_context = ""
+                            if patch.root_cause and patch.root_cause.strip():
+                                console.print(Panel(
+                                    patch.root_cause.strip(),
+                                    title="[bold green]Thinking and Approach Rationale[/bold green]",
+                                    border_style="green",
+                                ))
+                            syntax = Syntax(patch.diff, "diff", theme="monokai", line_numbers=True)
+                            console.print(Panel(syntax, title="[bold cyan]Revised Patch Diff[/bold cyan]", border_style="cyan"))
+                            val = validate_patch(repo_path, patch.diff)
+                            if val.applies_cleanly:
+                                console.print("[bold green][OK] Pre-validation check: Revised patch applies cleanly to the repository.[/bold green]")
+                            else:
+                                console.print(f"[bold yellow][WARN] Pre-validation note: {val.error}[/bold yellow]")
+                                last_error_context = f"Pre-validation error: {val.error}"
+                        else:
+                            console.print("[red][ERROR] Model did not return a valid revised diff block. Retaining previous patch.[/red]")
+                    except Exception as exc:
+                        console.print(f"\n[red][ERROR] Error generating patch fix: {exc}[/red]")
+
                 elif action in ("m", "merge", "apply", "y", "yes"):
                     applied, msg = apply_patch(repo_path, patch.diff)
                     if applied:
@@ -280,6 +341,9 @@ def run_chat_session(
                         console.print("[green][OK] Permanent AST graph synchronized.[/green]")
                     else:
                         console.print(f"[red][ERROR] Failed to apply patch: {msg}[/red]")
+                        last_error_context = f"Failed to apply patch: {msg}"
+                        console.print("[bold yellow][TIP] Type 'f' to ask the LLM to fix this patch.[/bold yellow]")
+                        continue
                     break
                 elif action in ("v", "view", "diff"):
                     syntax = Syntax(patch.diff, "diff", theme="monokai", line_numbers=True)
@@ -288,4 +352,4 @@ def run_chat_session(
                     console.print("[yellow][INFO] Patch discarded. Repository was not modified.[/yellow]")
                     break
                 else:
-                    console.print("[yellow]Invalid option. Please choose t, m, v, or d.[/yellow]")
+                    console.print("[yellow]Invalid option. Please choose t, f, m, v, or d.[/yellow]")
